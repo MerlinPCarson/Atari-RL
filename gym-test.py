@@ -1,17 +1,9 @@
-# import gym
-
-
-
-# env = gym.make("Pong-v0")
-# env.reset()
-# while True:
-# 	env.render()
-
-
 """ Trains an agent with (stochastic) Policy Gradients on Pong. Uses OpenAI Gym. """
 import numpy as np
 import cPickle as pickle
 import gym
+import matplotlib.pyplot as plt
+import pdb
 
 # hyperparameters
 H = 200 # number of hidden layer neurons
@@ -21,6 +13,7 @@ gamma = 0.99 # discount factor for reward
 decay_rate = 0.99 # decay factor for RMSProp leaky sum of grad^2
 resume = False # resume from previous checkpoint?
 render = False
+# plot_freq = 2
 
 # model initialization
 D = 80 * 80 # input dimensionality: 80x80 grid
@@ -29,11 +22,16 @@ if resume:
 else:
   model = {}
   model['W1'] = np.random.randn(H,D) / np.sqrt(D) # "Xavier" initialization
-  model['W2'] = np.random.randn(H) / np.sqrt(H)
+  model['W2'] = np.random.randn(H, H) / np.sqrt(H)
+  model['W3'] = np.random.randn(H) / np.sqrt(H)
 
-  # add new weight
-  
-grad_buffer = { k : np.zeros_like(v) for k,v in model.iteritems() } # update buffers that add up gradients over a batch
+# grad_buffer = { k : np.zeros_like(v) for k,v in model.iteritems() } # update buffers that add up gradients over a batch
+grad_buffer = {}
+for k, v in model.iteritems():
+  if k == 'W1':
+    grad_buffer[k] = np.zeros(shape = (40000, 6400))
+  else:
+    grad_buffer[k] = np.zeros_like(v)
 rmsprop_cache = { k : np.zeros_like(v) for k,v in model.iteritems() } # rmsprop memory
 
 def sigmoid(x): 
@@ -59,19 +57,32 @@ def discount_rewards(r):
   return discounted_r
 
 def policy_forward(x):
-  h = np.dot(model['W1'], x)
-  h[h<0] = 0 # ReLU nonlinearity
-  logp = np.dot(model['W2'], h)
-  p = sigmoid(logp)
-  return p, h # return probability of taking action 2, and hidden state
+  h1 = np.dot(model['W1'], x)
+  h1[np.where(h1<0)] = 0 # ReLU nonlinearity
+
+  h2 = np.dot(model['W2'], h1)
+  h2[np.where(h2<0)] = 0
+
+  logp = np.dot(model['W3'], h2)
+  p = sigmoid(logp) # sigmoid on the last layer
+
+  # logp = np.dot(model['W2'], h)
+  # p = sigmoid(logp)
+  return p, h2 # return probability of taking action 2, and hidden state(s)
 
 def policy_backward(eph, epdlogp):
   """ backward pass. (eph is array of intermediate hidden states) """
-  dW2 = np.dot(eph.T, epdlogp).ravel()
+  # print(eph.shape, epdlogp.shape)
+  dW3 = np.dot(eph.T, epdlogp).ravel()
+  dh1 = np.outer(epdlogp, model['W3'])
+  dh1[np.where(eph <= 0)] = 0
+
+  dW2 = np.dot(dh1.T, epdlogp).ravel()
   dh = np.outer(epdlogp, model['W2'])
-  dh[eph <= 0] = 0 # backpro prelu
+  dh[np.where(eph <= 0)] = 0 # backpro prelu
+
   dW1 = np.dot(dh.T, epx)
-  return {'W1':dW1, 'W2':dW2}
+  return {'W1' : dW1, 'W2' : dW2, 'W3': dW3}
 
 env = gym.make("Pong-v0")
 observation = env.reset()
@@ -81,7 +92,7 @@ running_reward = None
 reward_sum = 0
 episode_number = 0
 while True:
-  render = env.render()  # training render change
+  if render: env.render()  # training render change
   # preprocess the observation, set input to network to be difference image
   cur_x = prepro(observation)
   x = cur_x - prev_x if prev_x is not None else np.zeros(D)
@@ -121,7 +132,10 @@ while True:
 
     epdlogp *= discounted_epr # modulate the gradient with advantage (PG magic happens right here.)
     grad = policy_backward(eph, epdlogp)
-    for k in model: grad_buffer[k] += grad[k] # accumulate grad over batch
+    # grad_buffer = {np.zeros_like(grad)}
+    for k in model: 
+      # fix grad buffer dict to have the same shape as grad. - fixes backprop
+      grad_buffer[k] += grad[k] # accumulate grad over batch
 
     # perform rmsprop parameter update every batch_size episodes
     if episode_number % batch_size == 0:
@@ -131,10 +145,12 @@ while True:
         model[k] += learning_rate * g / (np.sqrt(rmsprop_cache[k]) + 1e-5)
         grad_buffer[k] = np.zeros_like(v) # reset batch gradient buffer
 
+
     # boring book-keeping
     running_reward = reward_sum if running_reward is None else running_reward * 0.99 + reward_sum * 0.01
     print 'resetting env. episode reward total was %f. running mean: %f' % (reward_sum, running_reward)
     if episode_number % 100 == 0: pickle.dump(model, open('save.p', 'wb'))
+    # all_game_scores.append(reward_sum+21.0)
     reward_sum = 0
     observation = env.reset() # reset env
     prev_x = None
